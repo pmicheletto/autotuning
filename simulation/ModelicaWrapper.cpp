@@ -1,4 +1,5 @@
 #include "ModelicaWrapper.h"
+#include <fmi4cpp/fmi2/fmi2TypesPlatform.h>
 #include <stdexcept>
 
 ModelicaWrapper::ModelicaWrapper(const std::string& fmuPath) {
@@ -21,13 +22,22 @@ void ModelicaWrapper::stepFMU(double stepSize) {
 }
 
 double ModelicaWrapper::getReal(const std::string& varName) {
-    double value = 0.0;
-    auto vr = _m_fmu->get_model_description()->get_variable_by_name(varName).value_reference;
+    const auto& var = _m_fmu->get_model_description()->get_variable_by_name(varName);
+    const auto vr = var.value_reference;
     
-    if (!_m_slave->read_real(vr, value)) {
-        throw std::runtime_error("Erro ao ler variavel: " + varName);
+    if (var.is_boolean()) {
+        fmi2Boolean boolValue = 0;
+        if (!_m_slave->read_boolean(vr, boolValue)) {
+            throw std::runtime_error("Erro ao ler variavel boolean: " + varName);
+        }
+        return boolValue ? 1.0 : 0.0;
+    } else {
+        double value = 0.0;
+        if (!_m_slave->read_real(vr, value)) {
+            throw std::runtime_error("Erro ao ler variavel: " + varName);
+        }
+        return value;
     }
-    return value;
 }
 
 void ModelicaWrapper::setReal(const std::string& varName, double value) {  // PROVISÓRIO
