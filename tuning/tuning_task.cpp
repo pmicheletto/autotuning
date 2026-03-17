@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iostream>
 #include <stdexcept>
 #include <vector>
 
@@ -35,6 +36,9 @@ void TuningTask::update() {
       if (_sundaresan.GetState() == SundaresanState::Done) {
         _plantModel = _sundaresan.GetPlantModel();
         _noise = _sundaresan.GetNoise();
+        std::cout << "Função de transferência encontrada (Sundaresan-Krishnaswamy):\n"
+                  << "  K = " << _plantModel.K << ", tau1 = " << _plantModel.tau1
+                  << ", tau2 = " << _plantModel.tau2 << ", theta = " << _plantModel.theta << " s\n";
         _state = TuningState::CONTROLLER_TUNING;
       } else {
         _state = TuningState::ERROR;
@@ -208,6 +212,12 @@ void TuningTask::tuneController() {
   if (_candidates.empty()) {
     _state = TuningState::ERROR;
     return;
+  }
+
+  std::cout << "Ganhos a testar (" << _candidates.size() << " candidatos):\n";
+  for (size_t i = 0; i < _candidates.size(); ++i) {
+    const auto& p = _candidates[i];
+    std::cout << "  [" << (i + 1) << "] Kp = " << p.Kp << ", Ti = " << p.Ti << ", Td = " << p.Td << "\n";
   }
 
   _currentCandidateIndex = 0;
