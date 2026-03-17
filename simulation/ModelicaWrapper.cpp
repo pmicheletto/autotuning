@@ -30,10 +30,17 @@ double ModelicaWrapper::getReal(const std::string& varName) {
     return value;
 }
 
-void ModelicaWrapper::setReal(const std::string& varName, double value) {
-    auto vr = _m_fmu->get_model_description()->get_variable_by_name(varName).value_reference;
-    
-    if (!_m_slave->write_real(vr, value)) {
-        throw std::runtime_error("Erro ao escrever variavel: " + varName);
+void ModelicaWrapper::setReal(const std::string& varName, double value) {  // PROVISÓRIO
+    const auto& var = _m_fmu->get_model_description()->get_variable_by_name(varName);
+    const auto vr = var.value_reference;
+
+    if (var.is_boolean()) {
+        if (!_m_slave->write_boolean(vr, value != 0.0)) {
+            throw std::runtime_error("Erro ao escrever variavel boolean: " + varName);
+        }
+    } else {
+        if (!_m_slave->write_real(vr, value)) {
+            throw std::runtime_error("Erro ao escrever variavel: " + varName);
+        }
     }
 }

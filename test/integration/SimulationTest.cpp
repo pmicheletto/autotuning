@@ -85,6 +85,6 @@ TEST(SimulationTest, SimulationWithWelford) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 
-    double speed = model.getReal("transferFunction.w");
+    double speed = model.getReal("transferFunction.y");
     EXPECT_TRUE(std::isfinite(speed));
 }
