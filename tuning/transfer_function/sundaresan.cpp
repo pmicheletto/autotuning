@@ -16,7 +16,7 @@ constexpr double kSimulationDt = 0.001;
 constexpr double kFirstStepRatio = 0.01;
 constexpr double kStepHeightRatio = 0.5;
 constexpr int kTimeoutIterations5s = 5000;
-constexpr unsigned int kDefaultFinderStopTime = 5000;
+constexpr unsigned int kDefaultFinderStopTime = 20000;
 constexpr unsigned int kMinStepsAtZero = 500;
 constexpr double kMovementThreshold = 0.2;
 constexpr double kSpeedNearZeroThreshold = 0.1;
@@ -30,9 +30,12 @@ Sundaresan::Sundaresan(ISystem& system)
     : _system(&system),
       _state(SundaresanState::FindingMovement),
       _timeout(kTimeoutIterations5s),
-      _step(kFirstStepRatio * kMaxReference),
+      _step(kFirstStepRatio),
       _finder(kDefaultFinderStopTime),
-      _stepHeightForCalc(kStepHeightRatio * kMaxReference) {}
+      _stepHeightForCalc(kStepHeightRatio) {
+  std::cout << "[Sundaresan] Etapa: início — procurando movimento (degrau inicial = "
+            << _step << ")\n";
+}
 
 PlantModel Sundaresan::extractTransferFunction() {
   return _plantModel;
@@ -41,13 +44,13 @@ PlantModel Sundaresan::extractTransferFunction() {
 bool Sundaresan::Execute() {
   switch (_state) {
     case SundaresanState::FindingMovement:
-      _system->setVariable("step.height", _step);
+      _system->setVariable("driver.step.height", _step);
       _timeout--;
       checkThereIsMovement();
       break;
 
     case SundaresanState::FindingDeadBand:
-      _system->setVariable("step.height", _step);
+      _system->setVariable("driver.step.height", _step);
       _stepCount++;
       checkDeadBand();
       break;
@@ -56,7 +59,7 @@ bool Sundaresan::Execute() {
       const bool phaseZeroOrThree =
           _calcPhase == CalcPhase::WaitZeroBeforeStep ||
           _calcPhase == CalcPhase::WaitZeroAfterFirstRun;
-      _system->setVariable("step.height",
+      _system->setVariable("driver.step.height",
                            phaseZeroOrThree ? 0.0 : _stepHeightForCalc);
       runCalculateTransferFunction();
       break;
@@ -70,7 +73,13 @@ bool Sundaresan::Execute() {
 }
 
 void Sundaresan::Task() {
+  std::cout << "[Sundaresan] Etapa: execução da tarefa (loop até conclusão)\n";
   while (Execute()) {
+  }
+  if (_state == SundaresanState::Done) {
+    std::cout << "[Sundaresan] Etapa: concluído com sucesso (modelo identificado)\n";
+  } else if (_state == SundaresanState::UnresponsivePlant) {
+    std::cout << "[Sundaresan] Etapa: tarefa encerrada — planta não responsiva\n";
   }
 }
 
@@ -83,6 +92,7 @@ double Sundaresan::readFilteredSpeed() {
 void Sundaresan::checkThereIsMovement() {
   const double filteredSpeed = readFilteredSpeed();
   if (filteredSpeed > kMovementThreshold) {
+    std::cout << "[Sundaresan] Etapa: movimento detectado — medindo ruído / banda morta\n";
     _state = SundaresanState::FindingDeadBand;
     _finder.MaxDeviationTimerStarter(static_cast<unsigned int>(_stepCount));
     return;
@@ -91,9 +101,12 @@ void Sundaresan::checkThereIsMovement() {
   if (_timeout == 0) {
     _step += kFirstStepRatio * kMaxReference;
     _timeout = kTimeoutIterations5s;
+    std::cout << "[Sundaresan] Etapa: tempo esgotado sem movimento — aumentando degrau para "
+              << _step << "\n";
   }
 
   if (_step > (kMaxReference / 2)) {
+    std::cout << "[Sundaresan] Etapa: planta não responsiva (degrau além do limite)\n";
     _state = SundaresanState::UnresponsivePlant;
   }
 }
@@ -103,12 +116,13 @@ void Sundaresan::checkDeadBand() {
   const bool timeout =
       _finder.AddData(filteredSpeed, static_cast<unsigned int>(_stepCount));
   if (timeout) {
+    std::cout << "[Sundaresan] Etapa: medição de ruído concluída — iniciando função de transferência\n";
     _noise = _finder.GetMaxStdDeviation();
-    std::cout << "noise: " << _noise << std::endl;
+    std::cout << "[Sundaresan] Ruído estimado: " << _noise << "\n";
     _welfordCalc.Clear();
     _calcPhase = CalcPhase::WaitZeroBeforeStep;
     _calcStepCount = 0;
-    _system->setVariable("step.height", 0.0);
+    _system->setVariable("driver.step.height", 0.0);
     _state = SundaresanState::CalculateTransferFunction;
   }
 }
@@ -147,12 +161,14 @@ void Sundaresan::runPhaseWaitZeroBeforeStep(double filteredSpeed) {
   _calcStepCount = 0;
   _welfordCalc.Clear();
   _calcPhase = CalcPhase::DetectTransientStart;
+  std::cout << "[Sundaresan] Etapa: saída em repouso próximo de zero — detectando início do transitório\n";
 }
 
 void Sundaresan::runPhaseDetectTransientStart() {
   if (_welfordCalc.GetDeviation() <= _noise) {
     return;
   }
+  std::cout << "[Sundaresan] Etapa: transitório detectado — aguardando estabilização da resposta\n";
   _calcPhase = CalcPhase::WaitSettled;
 }
 
@@ -161,9 +177,11 @@ void Sundaresan::runPhaseWaitSettled(double filteredSpeed) {
     return;
   }
   _finalValue = filteredSpeed;
+  std::cout << "[Sundaresan] Etapa: resposta estabilizada — valor final estimado = " << _finalValue
+            << "\n";
   _calcPhase = CalcPhase::WaitZeroAfterFirstRun;
   _calcStepCount = 0;
-  _system->setVariable("step.height", 0.0);
+  _system->setVariable("driver.step.height", 0.0);
 }
 
 void Sundaresan::runPhaseWaitZeroAfterFirstRun(double filteredSpeed) {
@@ -174,6 +192,7 @@ void Sundaresan::runPhaseWaitZeroAfterFirstRun(double filteredSpeed) {
   if (stillSettling) {
     return;
   }
+  std::cout << "[Sundaresan] Etapa: retorno após primeiro degrau — preparando medição de t1 e t2\n";
   _calcPhase = CalcPhase::MeasureT1T2;
   _secondStepApplied = false;
   _t1Set = false;
@@ -184,6 +203,9 @@ void Sundaresan::runPhaseWaitZeroAfterFirstRun(double filteredSpeed) {
 
 void Sundaresan::runPhaseMeasureT1T2(double filteredSpeed) {
   if (!_secondStepApplied) {
+    std::cout << "[Sundaresan] Etapa: segundo degrau aplicado — cronometrando "
+              << (kPercentT1 * 100) << "% e " << (kPercentT2 * 100)
+              << "% do valor final\n";
     _secondStepApplied = true;
     _calcStepCount = 0;
     return;
@@ -212,10 +234,10 @@ void Sundaresan::runPhaseMeasureT1T2(double filteredSpeed) {
   }
 
   if (_t1Set && _t2Set) {
-
+    std::cout << "[Sundaresan] Etapa: tempos t1 e t2 obtidos — calculando parâmetros FOPDT\n";
     std::cout << "Sundaresan-Krishnaswamy: t1 = " << _t1 << " s, t2 = " << _t2
               << " s\n";
-              
+
     finishPlantModel();
     _state = SundaresanState::Done;
   }
@@ -227,6 +249,7 @@ void Sundaresan::finishPlantModel() {
   _plantModel.tau1 = (deltaT > 0.0) ? 0.67 * deltaT : 0.0;
   _plantModel.K =
       (_stepHeightForCalc > 0.0) ? (_finalValue / _stepHeightForCalc) : 0.0;
+  std::cout << "k: " << _plantModel.K << ", final_value: " << _finalValue << "step: " << _stepHeightForCalc << std::endl;
   _plantModel.tau2 = 0.0;
 }
 

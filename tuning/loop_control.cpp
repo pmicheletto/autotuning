@@ -22,4 +22,11 @@ void applyPID(ISystem& system, double Kp, double Ki, double Kd,
   system.setVariable(names.Td, Td);
 }
 
+void applyPIDWithTimeConstants(ISystem& system, double Kp, double Ti, double Td,
+                               const ControllerVarNames& names) {
+  const double Ki = (Ti > 1e-12) ? Kp / Ti : 0.0;
+  const double Kd = Kp * Td;
+  applyPID(system, Kp, Ki, Kd, names);
+}
+
 }  // namespace loop_control

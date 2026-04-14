@@ -57,7 +57,13 @@ if(UNIT_TEST_SOURCES)
     create_test_target(sim_unit_tests "${UNIT_TEST_SOURCES}")
 endif()
 
-file(GLOB_RECURSE INTEGRATION_TEST_SOURCES "test/integration/*.cpp")
-if(INTEGRATION_TEST_SOURCES)
-    create_test_target(sim_integration_tests "${INTEGRATION_TEST_SOURCES}")
-endif()
+# SundaresanTest.cpp tem main() (demo); nao ligar com gmock_main / gtest_discover_tests.
+set(INTEGRATION_TEST_SOURCES test/integration/SimulationTest.cpp)
+create_test_target(sim_integration_tests "${INTEGRATION_TEST_SOURCES}")
+
+add_executable(sundaresan_demo test/integration/SundaresanTest.cpp)
+target_link_libraries(sundaresan_demo PRIVATE simulation_lib)
+set_target_properties(sundaresan_demo PROPERTIES
+    BUILD_RPATH "${CMAKE_BINARY_DIR}/lib/FMI4cpp/src"
+    INSTALL_RPATH "${CMAKE_BINARY_DIR}/lib/FMI4cpp/src"
+)

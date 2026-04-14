@@ -12,17 +12,22 @@
 enum class TuningState {
   PLANT_IDENTIFICATION,
   CONTROLLER_TUNING,
-  TEST_CONTROLLER,  // malha fechada: step 50%, verificar transiente/ruído, analisar overshoot/oscilação/seguimento
+  TEST_CONTROLLER,  // malha fechada: referência = degrau de identificação × K (saída alvo), transiente/IAE etc.
   COMPLETED,
   ERROR
 };
 
 // Fases do teste de cada candidato PID (estilo Sundaresan: desvio vs ruído, depois análise).
 enum class TestPhase {
-  Prepare,       // aplicar PID, fechar malha, step 50%
+  Prepare,       // aplicar PID, fechar malha, referência = K × degrau de entrada (como na identificação)
   WaitTransient, // esperar desvio da saída > ruído
-  WaitTouchRef,  // esperar saída tocar a referência (50%) para começar análise
+  WaitTouchRef,  // esperar saída tocar a referência alvo para começar análise
   Analyze        // medir overshoot 5%, oscilação e seguimento (desvio)
+};
+
+enum class ControllerTestRound {
+  INITIAL,    // 4 ganhos espaçados em τ_c
+  REFINEMENT  // laterais dos dois melhores τ_c da 1.ª fase
 };
 
 class TuningTask {
@@ -50,8 +55,11 @@ class TuningTask {
 
  private:
   void tuneController();
-  void runTestController();  // um passo da máquina de estados do teste (step 50%, desvio>ruído, análise)
-  std::vector<double> buildTcCandidates() const;
+  void runTestController();  // um passo da máquina de estados do teste (referência coerente com K, análise)
+  std::vector<double> buildInitialFourTc() const;
+  void appendLateralCandidatesFromTopTwo();
+  bool hasNearbyTc(double tc) const;
+  void onCandidateTestFinished(double score, double iaeIfMeaningful);
   bool isBetterParams(const PIDParameters& current, const PIDParameters& best);
   // Pontuação do candidato atual: penaliza overshoot>5% e oscilação; recompensa seguimento (menor IAE = melhor).
   double scoreCurrentCandidate() const;
@@ -72,7 +80,10 @@ class TuningTask {
   size_t _currentCandidateIndex{0};
   TestPhase _testPhase{TestPhase::Prepare};
   unsigned int _prepareSteps{0};  // passos em Prepare (assentar entre candidatos)
-  static constexpr double kReference50 = 50.0;  // step 50% (mesmo que Sundaresan)
+  // Degrau na entrada na fase Sundaresan (0.5×100); manter alinhado a sundaresan.cpp kStepHeightRatio*kMaxReference.
+  static constexpr double kIdentificationInputStep = 0.5;
+  // Referência em malha fechada = kIdentificationInputStep × K (mesma saída em regime que o degrau aberto).
+  double _closedLoopReference{0.0};
   WelfordAlgorithm _testWelford{10};
 
   bool _touchedRef{false};
@@ -86,6 +97,16 @@ class TuningTask {
   static constexpr unsigned int kSettleStepsBetweenCandidates = 2000;
   static constexpr unsigned int kWaitTouchRefTimeoutSteps = 15000;
   static constexpr double kOvershootThreshold = 1.05;  // 5% overshoot
+  // 4 τ_c iniciais: log-uniforme entre kInitialTcMinFactor·base e kInitialTcMaxFactor·base.
+  static constexpr double kInitialTcMinFactor = 0.35;
+  static constexpr double kInitialTcMaxFactor = 3.2;
+  // Laterais: (1±kTcLateralFraction)·τ_c em torno de cada um dos dois melhores da 1.ª fase.
+  static constexpr double kTcLateralFraction = 0.22;
+  static constexpr double kTcNearRelativeTol = 0.04;  // não repetir τ_c quase iguais
+  ControllerTestRound _controllerTestRound{ControllerTestRound::INITIAL};
+  size_t _round1Count{0};
+  std::vector<double> _candidateTc;
+  std::vector<double> _candidateScores;
   unsigned int _waitTouchRefSteps{0};
 
   size_t _bestCandidateIndex{0};
