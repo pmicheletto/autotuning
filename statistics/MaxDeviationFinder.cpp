@@ -30,22 +30,8 @@ bool MaxDeviationFinder::CheckTimeout(unsigned int timestamp) {
   return (timestamp - start_time_) > stop_time_;
 }
 
-double MaxDeviationFinder::TruncateToFirstDigit(double value) const {
-  if (value == 0.0) {
-    return 0.0;
-  }
-  int exponent = static_cast<int>(std::floor(std::log10(std::fabs(value))));
-  double scaled_value = value / std::pow(10, exponent);
-  scaled_value = std::floor(scaled_value);
-  return scaled_value * std::pow(10, exponent);
-}
-
 double MaxDeviationFinder::GetMaxStdDeviation() const {
   return max_std_deviation_;
-}
-
-double MaxDeviationFinder::GetMaxTruncatedStdDeviation() const {
-  return TruncateToFirstDigit(max_std_deviation_);
 }
 
 void MaxDeviationFinder::Clear() {

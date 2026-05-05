@@ -21,11 +21,10 @@ struct ControllerVarNames {
   std::string Td{"driver.pid.Td"};
 };
 
-// Kp, Ki, Kd em forma paralela (Ki = Kp/Ti, Kd = Kp·Td se Ti/Td forem tempos no modelo).
+// Parallel form: Ki = Kp/Ti, Kd = Kp*Td; maps to Gain.k, I.k, D.k, D.T, P.k in OpenModelica.
 void applyPID(ISystem& system, double Kp, double Ki, double Kd,
               const ControllerVarNames& names = ControllerVarNames{});
 
-// Ti e Td como constantes de tempo (ex.: Skogestad); converte para Ki/Kd antes de enviar ao FMU.
 void applyPIDWithTimeConstants(ISystem& system, double Kp, double Ti, double Td,
                                const ControllerVarNames& names = ControllerVarNames{});
 

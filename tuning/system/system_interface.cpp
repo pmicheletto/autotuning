@@ -1,6 +1,5 @@
 #include "system_interface.h"
 
-// Forward declarations
 std::unique_ptr<ISystem> createSimulationSystem(const std::string& fmuPath);
 std::unique_ptr<ISystem> createHardwareSystem();
 

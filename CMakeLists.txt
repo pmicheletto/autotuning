@@ -32,7 +32,7 @@ add_library(simulation_lib
 target_link_libraries(simulation_lib PUBLIC fmi4cpp statistics_lib tuning_lib)
 target_include_directories(simulation_lib PUBLIC ${CMAKE_SOURCE_DIR})
 
-add_executable(sim main.cpp autotuning_manager.cpp)
+add_executable(sim main.cpp)
 target_link_libraries(sim PRIVATE simulation_lib)
 set_target_properties(sim PROPERTIES
     BUILD_RPATH "${CMAKE_BINARY_DIR}/lib/FMI4cpp/src"
@@ -58,7 +58,10 @@ if(UNIT_TEST_SOURCES)
 endif()
 
 # SundaresanTest.cpp tem main() (demo); nao ligar com gmock_main / gtest_discover_tests.
-set(INTEGRATION_TEST_SOURCES test/integration/SimulationTest.cpp)
+set(INTEGRATION_TEST_SOURCES
+  test/integration/SimulationTest.cpp
+  test/integration/JerkFmuClosedLoopTest.cpp
+)
 create_test_target(sim_integration_tests "${INTEGRATION_TEST_SOURCES}")
 
 add_executable(sundaresan_demo test/integration/SundaresanTest.cpp)

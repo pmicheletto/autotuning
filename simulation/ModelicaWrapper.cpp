@@ -17,7 +17,7 @@ void ModelicaWrapper::init(double startTime) {
 
 void ModelicaWrapper::stepFMU(double stepSize) {
     if (!_m_slave->step(stepSize)) {
-        throw std::runtime_error("Erro no passo da FMU!");
+        throw std::runtime_error("FMU step failed");
     }
 }
 
@@ -28,29 +28,30 @@ double ModelicaWrapper::getReal(const std::string& varName) {
     if (var.is_boolean()) {
         fmi2Boolean boolValue = 0;
         if (!_m_slave->read_boolean(vr, boolValue)) {
-            throw std::runtime_error("Erro ao ler variavel boolean: " + varName);
+            throw std::runtime_error("Failed to read boolean variable: " + varName);
         }
         return boolValue ? 1.0 : 0.0;
     } else {
         double value = 0.0;
         if (!_m_slave->read_real(vr, value)) {
-            throw std::runtime_error("Erro ao ler variavel: " + varName);
+            throw std::runtime_error("Failed to read real variable: " + varName);
         }
         return value;
     }
 }
 
-void ModelicaWrapper::setReal(const std::string& varName, double value) {  // PROVISÓRIO
+// Writes Real or Boolean (coerced from non-zero) variables by name.
+void ModelicaWrapper::setReal(const std::string& varName, double value) {
     const auto& var = _m_fmu->get_model_description()->get_variable_by_name(varName);
     const auto vr = var.value_reference;
 
     if (var.is_boolean()) {
         if (!_m_slave->write_boolean(vr, value != 0.0)) {
-            throw std::runtime_error("Erro ao escrever variavel boolean: " + varName);
+            throw std::runtime_error("Failed to write boolean variable: " + varName);
         }
     } else {
         if (!_m_slave->write_real(vr, value)) {
-            throw std::runtime_error("Erro ao escrever variavel: " + varName);
+            throw std::runtime_error("Failed to write real variable: " + varName);
         }
     }
 }

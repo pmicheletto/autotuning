@@ -8,10 +8,16 @@
 #include "tuning/transfer_function/sundaresan.h"
 
 namespace {
-// Estado para JSON (PlotJuggler): 0=FindingMovement, 1=FindingDeadBand, 2=CalculateTransferFunction, 3=Done, 4=UnresponsivePlant
-int stateToInt(SundaresanState s) {
-  return static_cast<int>(s);
-}
+
+constexpr int kMaxSteps = 25000;
+constexpr double kSimulationStepS = 0.001;
+constexpr const char* kUdpHost = "127.0.0.1";
+constexpr int kUdpPort = 9870;
+constexpr int kUdpEveryNSteps = 100;
+constexpr int kProgressLogEveryNSteps = 5000;
+// Throttle loop so UDP is ~1 ms per FMU step for PlotJuggler.
+constexpr int kWallClockSleepMsPerStep = 1;
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -23,35 +29,30 @@ int main(int argc, char** argv) {
   try {
     auto system = createSystem(true, fmuPath);
     if (!system) {
-      std::cerr << "Erro: nao foi possivel criar o sistema de simulacao.\n";
+      std::cerr << "Error: could not create simulation system.\n";
       return 1;
     }
 
     Sundaresan alg(*system);
 
-    UDPSender udp("127.0.0.1", 9870);
-    const int udpInterval = 100;
+    UDPSender udp(kUdpHost, kUdpPort);
+    std::cout << "Finding movement then dead band (FMU: " << fmuPath << "). UDP: " << kUdpHost
+              << ":" << kUdpPort << " every " << kUdpEveryNSteps << " steps. " << kMaxSteps
+              << " steps (" << (kMaxSteps * kSimulationStepS) << " s sim).\n";
 
-    const int maxSteps = 25000;
-    const double simulationStep = 0.001;
-    std::cout << "A procurar movimento e depois dead band (FMU: " << fmuPath
-              << "). UDP: 127.0.0.1:9870 a cada " << udpInterval
-              << " passos. " << maxSteps << " passos (" << (maxSteps * simulationStep) << " s sim).\n";
-
-    for (int i = 0; i < maxSteps; ++i) {
-      system->advanceSimulation(simulationStep);
+    for (int i = 0; i < kMaxSteps; ++i) {
+      system->advanceSimulation(kSimulationStepS);
       alg.Execute();
       if (alg.IsFinished()) {
-        std::cout << "Fim: " << (i + 1) << " passos concluidos.\n";
+        std::cout << "Done: " << (i + 1) << " steps.\n";
         break;
       }
-      double t = (i + 1) * simulationStep;
+      double t = (i + 1) * kSimulationStepS;
       double speed = system->readValue("out");
       double stepY = system->readValue("step.y");
       bool manual_control = system->readValue("manual");
 
-      if ((i + 1) % udpInterval == 0) {
-        int state = stateToInt(alg.GetState());
+      if ((i + 1) % kUdpEveryNSteps == 0) {
         double noise = alg.GetNoise();
         double deviation = alg.GetDeviation();
         double filteredSpeed = alg.GetFilteredSpeed();
@@ -65,23 +66,21 @@ int main(int argc, char** argv) {
             ", \"desvio_padrao\": " + std::to_string(deviation) + "}";
         udp.send(json);
       }
-      if ((i + 1) % 5000 == 0) {
-        std::cout << "  " << (i + 1) << " / " << maxSteps << " passos (" << t << " s)\n";
+      if ((i + 1) % kProgressLogEveryNSteps == 0) {
+        std::cout << "  " << (i + 1) << " / " << kMaxSteps << " steps (" << t << " s)\n";
       }
-      // Sem este sleep, os 25000 passos correm em segundos e o UDP chega tudo de uma vez;
-      // o PlotJuggler (e a sensação de "a correr") precisam de tempo real ~1 ms por passo.
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      std::this_thread::sleep_for(std::chrono::milliseconds(kWallClockSleepMsPerStep));
     }
 
     const SundaresanState state = alg.GetState();
 
     if (state == SundaresanState::Done) {
-      std::cout << "Dead band encontrada.\n";
-      std::cout << "  Ruido (max desvio truncado): " << alg.GetNoise() << "\n";
-      std::cout << "  Valor final (speed): " << alg.GetFinalValue() << "\n";
+      std::cout << "Dead band found.\n";
+      std::cout << "  Noise (max truncated deviation): " << alg.GetNoise() << "\n";
+      std::cout << "  Final value (speed): " << alg.GetFinalValue() << "\n";
       const PlantModel& pm = alg.GetPlantModel();
-      std::cout << "Funcao de transferencia (Sundaresan-Krishnaswamy):\n";
-      std::cout << "  K (ganho): " << pm.K << "\n";
+      std::cout << "Transfer function (Sundaresan-Krishnaswamy):\n";
+      std::cout << "  K (gain): " << pm.K << "\n";
       std::cout << "  theta (dead time): " << pm.theta << "\n";
       std::cout << "  tau1: " << pm.tau1 << "\n";
       std::cout << "  tau2: " << pm.tau2 << "\n";
@@ -89,15 +88,15 @@ int main(int argc, char** argv) {
     }
 
     if (state == SundaresanState::UnresponsivePlant) {
-      std::cout << "Planta nao respondeu (simulationStep > 0.5).\n";
+      std::cout << "Plant did not respond (step command exceeded limit).\n";
       return 1;
     }
 
-    std::cout << "Estado final: " << static_cast<int>(state) << "\n";
+    std::cout << "Final state: " << static_cast<int>(state) << "\n";
     return 0;
 
   } catch (const std::exception& e) {
-    std::cerr << "Erro: " << e.what() << "\n";
+    std::cerr << "Error: " << e.what() << "\n";
     return 1;
   }
 }

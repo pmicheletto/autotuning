@@ -1,16 +1,16 @@
 #include "sundaresan.h"
 
 #include <algorithm>
+#include <cmath>
 #include <iostream>
 
 #include "../system/system_interface.h"
 
 namespace {
 
-// Parâmetros Sundaresan-Krishnaswamy
 constexpr double kMaxReference = 100.0;
-constexpr double kPercentT1 = 0.353;   // 35.3%
-constexpr double kPercentT2 = 0.853;  // 85.3%
+constexpr double kPercentT1 = 0.353;
+constexpr double kPercentT2 = 0.853;
 constexpr double kSimulationDt = 0.001;
 
 constexpr double kFirstStepRatio = 0.01;
@@ -20,7 +20,7 @@ constexpr unsigned int kDefaultFinderStopTime = 20000;
 constexpr unsigned int kMinStepsAtZero = 500;
 constexpr double kMovementThreshold = 0.2;
 constexpr double kSpeedNearZeroThreshold = 0.1;
-constexpr double kSettledFractionOfFinal = 0.1;
+constexpr unsigned int kWaitSettledStablePassesRequired = 10;
 
 }  // namespace
 
@@ -35,10 +35,6 @@ Sundaresan::Sundaresan(ISystem& system)
       _stepHeightForCalc(kStepHeightRatio) {
   std::cout << "[Sundaresan] Etapa: início — procurando movimento (degrau inicial = "
             << _step << ")\n";
-}
-
-PlantModel Sundaresan::extractTransferFunction() {
-  return _plantModel;
 }
 
 bool Sundaresan::Execute() {
@@ -70,17 +66,6 @@ bool Sundaresan::Execute() {
   }
   return _state != SundaresanState::Done &&
          _state != SundaresanState::UnresponsivePlant;
-}
-
-void Sundaresan::Task() {
-  std::cout << "[Sundaresan] Etapa: execução da tarefa (loop até conclusão)\n";
-  while (Execute()) {
-  }
-  if (_state == SundaresanState::Done) {
-    std::cout << "[Sundaresan] Etapa: concluído com sucesso (modelo identificado)\n";
-  } else if (_state == SundaresanState::UnresponsivePlant) {
-    std::cout << "[Sundaresan] Etapa: tarefa encerrada — planta não responsiva\n";
-  }
 }
 
 double Sundaresan::readFilteredSpeed() {
@@ -169,14 +154,21 @@ void Sundaresan::runPhaseDetectTransientStart() {
     return;
   }
   std::cout << "[Sundaresan] Etapa: transitório detectado — aguardando estabilização da resposta\n";
+  _waitSettledStablePasses = 0;
   _calcPhase = CalcPhase::WaitSettled;
 }
 
 void Sundaresan::runPhaseWaitSettled(double filteredSpeed) {
   if (_welfordCalc.GetDeviation() > _noise) {
+    _waitSettledStablePasses = 0;
+    return;
+  }
+  _waitSettledStablePasses++;
+  if (_waitSettledStablePasses < kWaitSettledStablePassesRequired) {
     return;
   }
   _finalValue = filteredSpeed;
+  _waitSettledStablePasses = 0;
   std::cout << "[Sundaresan] Etapa: resposta estabilizada — valor final estimado = " << _finalValue
             << "\n";
   _calcPhase = CalcPhase::WaitZeroAfterFirstRun;
@@ -185,11 +177,13 @@ void Sundaresan::runPhaseWaitSettled(double filteredSpeed) {
 }
 
 void Sundaresan::runPhaseWaitZeroAfterFirstRun(double filteredSpeed) {
+  // Same near-zero criterion as runPhaseWaitZeroBeforeStep.
+  if (filteredSpeed >= kSpeedNearZeroThreshold) {
+    _calcStepCount = 0;
+    return;
+  }
   _calcStepCount++;
-  const bool stillSettling =
-      filteredSpeed >= kSettledFractionOfFinal * _finalValue ||
-      _calcStepCount < kMinStepsAtZero;
-  if (stillSettling) {
+  if (_calcStepCount < kMinStepsAtZero) {
     return;
   }
   std::cout << "[Sundaresan] Etapa: retorno após primeiro degrau — preparando medição de t1 e t2\n";

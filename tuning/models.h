@@ -8,10 +8,10 @@ struct PIDParameters {
 };
 
 struct PlantModel {
-  double K;      // Ganho
-  double tau1;   // Constante de tempo dominante
-  double tau2;   // Segunda constante de tempo (para 2nd ordem)
-  double theta;  // Atraso total (dead time)
+  double K;       // Process gain
+  double tau1;    // Dominant time constant
+  double tau2;    // Second time constant (second-order models)
+  double theta;   // Effective dead time
 };
 
 #endif

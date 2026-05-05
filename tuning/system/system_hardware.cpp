@@ -1,22 +1,24 @@
 #include "system_interface.h"
+
 #include <stdexcept>
 
-// Implementação stub para hardware (vazia por enquanto)
+// Stub `ISystem` for future hardware I/O; every call throws until implemented.
 class HardwareSystem : public ISystem {
  public:
-  void advanceSimulation(double dt) override {
-    // TODO: Implementar quando necessário (ex.: esperar dt segundos / próxima amostra)
-    throw std::runtime_error("HardwareSystem não implementado ainda");
+  void reset() override {
+    throw std::runtime_error("HardwareSystem: not implemented");
   }
 
-  double readValue(const std::string& varName) override {
-    // TODO: Implementar quando necessário
-    throw std::runtime_error("HardwareSystem não implementado ainda");
+  void advanceSimulation(double) override {
+    throw std::runtime_error("HardwareSystem: not implemented");
   }
 
-  void setVariable(const std::string& varName, double value) override {
-    // TODO: Implementar quando necessário
-    throw std::runtime_error("HardwareSystem não implementado ainda");
+  double readValue(const std::string&) override {
+    throw std::runtime_error("HardwareSystem: not implemented");
+  }
+
+  void setVariable(const std::string&, double) override {
+    throw std::runtime_error("HardwareSystem: not implemented");
   }
 };
 

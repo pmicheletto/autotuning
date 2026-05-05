@@ -14,7 +14,6 @@ enum class SundaresanState {
   UnresponsivePlant,
 };
 
-// Fases internas do cálculo Sundaresan-Krishnaswamy
 enum class CalcPhase {
   WaitZeroBeforeStep,
   DetectTransientStart,
@@ -29,18 +28,15 @@ class Sundaresan {
  public:
   explicit Sundaresan(ISystem& system);
 
-  static PlantModel extractTransferFunction();
-  //nodiscard C++17
   [[nodiscard]] double GetNoise() const;
-  [[nodiscard]] double GetDeviation();      // usa WelfordAlgorithm (não-const)
-  [[nodiscard]] double GetFilteredSpeed();  // usa WelfordAlgorithm (não-const)
+  [[nodiscard]] double GetDeviation();
+  [[nodiscard]] double GetFilteredSpeed();
   [[nodiscard]] double GetFinalValue() const;
   [[nodiscard]] SundaresanState GetState() const;
   [[nodiscard]] const PlantModel& GetPlantModel() const;
   [[nodiscard]] bool IsFinished() const;
 
   bool Execute();
-  void Task();
 
  private:
   double readFilteredSpeed();
@@ -68,6 +64,7 @@ class Sundaresan {
   WelfordAlgorithm _welfordCalc{10};
   CalcPhase _calcPhase{CalcPhase::WaitZeroBeforeStep};
   unsigned int _calcStepCount{0};
+  unsigned int _waitSettledStablePasses{0};
   double _t1{0.0};
   double _t2{0.0};
   bool _t1Set{false};

@@ -3,13 +3,26 @@
 #include "simulation/ModelicaWrapper.h"
 #include "system_interface.h"
 
-// Implementação para simulação: setVariable escreve no modelo (ex.: step.height = degrau de alimentação);
-// advanceSimulation faz a simulação correr no tempo (stepFMU).
+namespace {
+
+// Initial simulation time after FMU init/reset (s).
+constexpr double kInitialSimulationTimeS = 0.0;
+
+}  // namespace
+
 class SimulationSystem : public ISystem {
  public:
   explicit SimulationSystem(const std::string& fmuPath)
-      : _wrapper(std::make_unique<ModelicaWrapper>(fmuPath)), _simulationTime(0.0) {
-    _wrapper->init(0.0);
+      : _fmuPath(fmuPath),
+        _wrapper(std::make_unique<ModelicaWrapper>(fmuPath)),
+        _simulationTime(kInitialSimulationTimeS) {
+    _wrapper->init(kInitialSimulationTimeS);
+  }
+
+  void reset() override {
+    _wrapper = std::make_unique<ModelicaWrapper>(_fmuPath);
+    _wrapper->init(kInitialSimulationTimeS);
+    _simulationTime = kInitialSimulationTimeS;
   }
 
   void advanceSimulation(double dt) override {
@@ -25,22 +38,21 @@ class SimulationSystem : public ISystem {
     _wrapper->setReal(varName, value);
   }
 
-  // Retorna o tempo de simulação correspondente a \p simulation_steps com passo \p dt.
   static double getSimulationTimeForSteps(int simulation_steps, double dt) {
     return static_cast<double>(simulation_steps) * dt;
   }
 
-  // Retorna o tempo de simulação atual (soma dos dt de advanceSimulation desde a criação).
   double getCurrentSimulationTime() const { return _simulationTime; }
 
  private:
+  std::string _fmuPath;
   std::unique_ptr<ModelicaWrapper> _wrapper;
   double _simulationTime;
 };
 
 std::unique_ptr<ISystem> createSimulationSystem(const std::string& fmuPath) {
   if (fmuPath.empty()) {
-    throw std::invalid_argument("Caminho do FMU necessário para simulação");
+    throw std::invalid_argument("FMU path is required for simulation");
   }
   return std::make_unique<SimulationSystem>(fmuPath);
 }

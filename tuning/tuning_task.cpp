@@ -2,11 +2,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iomanip>
 #include <iostream>
 #include <limits>
-#include <numeric>
+#include <sstream>
 #include <stdexcept>
-#include <vector>
 
 #include "loop_control.h"
 #include "parameters/parameter_validator.h"
@@ -14,12 +14,59 @@
 
 namespace {
 constexpr const char* kOutputVar = "out";
+
+std::string formatPercentForLog(double value) {
+  std::ostringstream oss;
+  oss << std::fixed << std::setprecision(2) << value << '%';
+  return oss.str();
+}
 }  // namespace
 
 TuningTask::TuningTask(ControllerType controllerType, ISystem& system)
     : _controllerType(controllerType),
       _system(&system),
       _sundaresan(system) {}
+
+void TuningTask::noteControllerTestJerkSample(std::optional<double> jerk) {
+  if (_state != TuningState::TEST_CONTROLLER) {
+    return;
+  }
+  if (_testPhase != TestPhase::WaitTouchRef) {
+    return;
+  }
+  if (!jerk.has_value() || !std::isfinite(*jerk)) {
+    return;
+  }
+  const double a = std::fabs(*jerk);
+  if (std::isnan(_jerkAbsMaxThisCandidate)) {
+    _jerkAbsMaxThisCandidate = a;
+  } else {
+    _jerkAbsMaxThisCandidate = std::max(_jerkAbsMaxThisCandidate, a);
+  }
+}
+
+double TuningTask::debugUdpJerkMaxCurrentCandidate() const {
+  return std::isfinite(_jerkAbsMaxThisCandidate)
+             ? _jerkAbsMaxThisCandidate
+             : std::numeric_limits<double>::quiet_NaN();
+}
+
+std::string TuningTask::debugTestPhaseName() const {
+  if (_state != TuningState::TEST_CONTROLLER) {
+    return "-";
+  }
+  switch (_testPhase) {
+    case TestPhase::Prepare:
+      return "Prepare";
+    case TestPhase::WaitTransient:
+      return "WaitTransient";
+    case TestPhase::WaitTouchRef:
+      return "WaitTouchRef";
+    case TestPhase::Analyze:
+      return "Analyze";
+  }
+  return "?";
+}
 
 void TuningTask::stepSimulation() {
   _system->advanceSimulation(_simulationStep);
@@ -50,6 +97,34 @@ void TuningTask::update() {
   }
 
   if (_state == TuningState::CONTROLLER_TUNING) {
+    loop_control::openLoop(*_system);
+    _system->setVariable("driver.step.height", 0.0);
+    if (!_postIdentificationWaitLogged) {
+      std::cout << "[Tuning] Pós-identificação: aguardando speed ~= 0 por "
+                << kPostIdentificationZeroStableSteps
+                << " amostras estáveis antes dos testes de ganhos.\n";
+      _postIdentificationWaitLogged = true;
+    }
+    const double output = _system->readValue(kOutputVar);
+    const double zeroTol =
+        std::max(kPostIdentificationZeroAbsTol,
+                 kPostIdentificationZeroNoiseFactor * _noise);
+    if (std::fabs(output) <= zeroTol) {
+      ++_postIdentificationZeroStreak;
+    } else {
+      _postIdentificationZeroStreak = 0;
+    }
+    ++_postIdentificationWaitCounter;
+    if (_postIdentificationZeroStreak < kPostIdentificationZeroStableSteps) {
+      return;
+    }
+    if (_postIdentificationWaitLogged) {
+      std::cout << "[Tuning] Pós-identificação concluída (speed ~= 0 por "
+                << _postIdentificationZeroStreak
+                << " amostras, total aguardado: " << _postIdentificationWaitCounter
+                << ") — iniciando testes de ganhos.\n";
+      _postIdentificationWaitLogged = false;
+    }
     tuneController();
     return;
   }
@@ -61,79 +136,181 @@ void TuningTask::update() {
 
 void TuningTask::runTestController() {
   const double output = _system->readValue(kOutputVar);
+  _testWelford.AddSample(output);
 
   switch (_testPhase) {
     case TestPhase::Prepare: {
-      if (_currentCandidateIndex > 0) {
-        loop_control::openLoop(*_system);
-        _system->setVariable("driver.step.height", 0.0);
-        _prepareSteps++;
-        if (_prepareSteps < kSettleStepsBetweenCandidates) {
-          return;
-        }
+      if (_prepareSteps == 0 && _resetSystemBeforePrepare) {
+        _system->reset();
+        _resetSystemBeforePrepare = false;
+      }
+      loop_control::openLoop(*_system);
+      _system->setVariable("driver.step.height", 0.0);
+      _prepareSteps++;
+      if (_prepareSteps == 1u) {
+        _prepareNearZeroStreak = 0;
+      }
+      const double prepareTol =
+          std::max(kPrepareZeroSpeedAbsTol,
+                   kPrepareZeroSpeedNoiseFactor * _noise);
+      const bool atPrepareZero = std::fabs(output) <= prepareTol;
+      if (atPrepareZero) {
+        ++_prepareNearZeroStreak;
+      } else {
+        _prepareNearZeroStreak = 0;
+      }
+      const bool prepareSettled =
+          atPrepareZero && _prepareNearZeroStreak >= kPrepareZeroStableSteps;
+      if (!prepareSettled && _prepareSteps < kPrepareZeroSpeedMaxSteps) {
+        return;
+      }
+      if (!prepareSettled) {
+        std::cout << "Aviso: saida (speed) nao estabilizou perto de 0 antes do candidato "
+                  << (_currentCandidateIndex + 1) << " (|out|=" << output
+                  << ", tol=" << prepareTol << ", passos=" << _prepareSteps << ") — continua.\n";
       }
       const PIDParameters& params = _candidates[_currentCandidateIndex];
-      loop_control::applyPIDWithTimeConstants(*_system, params.Kp, params.Ti,
-                                              params.Td);
+      double kpApply = params.Kp;
+      double tiApply = params.Ti;
+      double tdApply = params.Td;
+      _closedLoopReference = kClosedLoopStepReference;
+      loop_control::applyPIDWithTimeConstants(*_system, kpApply, tiApply, tdApply);
       loop_control::closeLoop(*_system);
-      _system->setVariable("driver.step.height", _closedLoopReference);
-      std::cout << "manual: " << _system->readValue("driver.useManualControl") << std::endl;
+      const double tcThis = (_currentCandidateIndex < _candidateTc.size())
+                                ? _candidateTc[_currentCandidateIndex]
+                                : std::numeric_limits<double>::quiet_NaN();
+      std::cout << "[Tuning] Início candidato " << (_currentCandidateIndex + 1) << "/"
+                << _candidates.size() << " (malha fechada): tau_c=" << tcThis
+                << ", Kp=" << kpApply << ", Ti=" << tiApply << ", Td=" << tdApply
+                << ", ref=" << _closedLoopReference << "\n";
       _testWelford.Clear();
       _prepareSteps = 0;
+      _prepareNearZeroStreak = 0;
       _waitTouchRefSteps = 0;
+      _waitTransientStepCount = 0;
       _testPhase = TestPhase::WaitTransient;
-      _touchedRef = false;
       _maxOutput = 0.0;
       _hasOvershoot5 = false;
       _oscillationCount = 0;
       _lastSign = 0;
+      _oscOutsideStreak = 0;
+      _oscOutsideDir = 0;
+      _oscOutsideLobeConfirmed = false;
+      _oscHystOutside = 0;
       _analyzeSumAbsError = 0.0;
       _analyzeStepCount = 0;
+      _settlingTimeS = std::numeric_limits<double>::quiet_NaN();
+      _waitTransientStallLogged = false;
+      _problematicoDebugPrinted = false;
+      _jerkAbsMaxThisCandidate = std::numeric_limits<double>::quiet_NaN();
       break;
     }
 
     case TestPhase::WaitTransient: {
-      _testWelford.AddSample(output);
+      _system->setVariable("driver.step.height", _closedLoopReference);
+      if (_waitTransientStepCount == 0) {
+        _waitTransientStartOutput = output;
+        _waitTransientPrevOutput = output;
+        std::cout << "[Tuning] WaitTransient inicio: out=" << output
+                  << ", ref=" << _closedLoopReference << "\n";
+      }
+      _waitTransientStepCount++;
       const double deviation = _testWelford.GetDeviation();
-      if (deviation > _noise) {
+      const double noiseFloor = std::max(_noise, 1e-12);
+      const double driftTol =
+          std::max(kWaitTransientDriftNoiseMult * noiseFloor,
+                   kWaitTransientDriftAbsMin);
+      const double drift = std::fabs(output - _waitTransientStartOutput);
+      const double stepJump = std::fabs(output - _waitTransientPrevOutput);
+      _waitTransientPrevOutput = output;
+
+      const bool byDeviation = deviation > _noise;
+      const bool byDrift = drift > driftTol;
+      const bool byRefProgress =
+          _closedLoopReference > 1e-9 &&
+          _waitTransientStartOutput <
+              kWaitTransientRefProgressMaxStartFrac * _closedLoopReference &&
+          output >= kWaitTransientRefProgressFrac * _closedLoopReference;
+      const bool byStepJump =
+          stepJump > kWaitTransientStepJumpNoiseMult * noiseFloor;
+
+      const double nearZeroTol =
+          std::max(kZeroSpeedAbsTol, kZeroSpeedNoiseFactor * _noise);
+      const bool stillNearZero = std::fabs(output) <= nearZeroTol;
+
+      if (byDeviation || byDrift || byRefProgress || byStepJump) {
+        std::cout << "[Tuning] WaitTransient -> WaitTouchRef (passos="
+                  << _waitTransientStepCount << ", desvio=" << deviation
+                  << ", drift=" << drift << ", |dout|=" << stepJump << ")\n";
+        _jerkAbsMaxThisCandidate = std::numeric_limits<double>::quiet_NaN();
         _testPhase = TestPhase::WaitTouchRef;
+      } else if (_waitTransientStepCount >= kWaitTransientMaxSteps &&
+                 !stillNearZero) {
+        std::cout << "Aviso: WaitTransient timeout (" << kWaitTransientMaxSteps
+                  << " passos) com saida fora de ~0 — segue para WaitTouchRef.\n";
+        _jerkAbsMaxThisCandidate = std::numeric_limits<double>::quiet_NaN();
+        _testPhase = TestPhase::WaitTouchRef;
+      } else if (_waitTransientStepCount >= kWaitTransientMaxSteps &&
+                 stillNearZero) {
+        _waitTransientStepCount = 0;
+        if (!_waitTransientStallLogged) {
+          std::cout << "Aviso: WaitTransient atingiu " << kWaitTransientMaxSteps
+                    << " passos com saida ainda ~0 — continua em WaitTransient "
+                       "até haver movimento.\n";
+          _waitTransientStallLogged = true;
+        }
       }
       break;
     }
 
     case TestPhase::WaitTouchRef: {
+      _system->setVariable("driver.step.height", _closedLoopReference);
       _waitTouchRefSteps++;
-      if (output >= _closedLoopReference) {
-        _touchedRef = true;
+      const double noiseFloorTouch = std::max(_noise, 1e-12);
+      const double refTouchTol =
+          std::max(kSettlingBandFrac * std::fabs(_closedLoopReference),
+                   kSettlingBandNoiseMult * noiseFloorTouch);
+      if (output >= _closedLoopReference - refTouchTol) {
         _maxOutput = output;
-        _lastSign = (output > _closedLoopReference ? 1 : 0);
+        _lastSign = 0;
+        _oscOutsideStreak = 0;
+        _oscOutsideDir = 0;
+        _oscOutsideLobeConfirmed = false;
+        _oscHystOutside = 0;
         _analyzeSumAbsError = 0.0;
         _analyzeStepCount = 0;
+        _settlingTimeS =
+            static_cast<double>(_waitTouchRefSteps) * _simulationStep;
         _waitTouchRefSteps = 0;
         _testPhase = TestPhase::Analyze;
       } else if (_waitTouchRefSteps >= kWaitTouchRefTimeoutSteps) {
-        onCandidateTestFinished(-1e9, std::numeric_limits<double>::quiet_NaN());
+        onCandidateTestFinished(-1e9, std::numeric_limits<double>::quiet_NaN(),
+                                std::numeric_limits<double>::quiet_NaN(), 0.0, 0,
+                                std::numeric_limits<double>::quiet_NaN());
       }
       break;
     }
 
     case TestPhase::Analyze: {
+      _system->setVariable("driver.step.height", _closedLoopReference);
       _maxOutput = std::max(_maxOutput, output);
       if (_maxOutput > _closedLoopReference * kOvershootThreshold) {
         _hasOvershoot5 = true;
       }
-      const double err = output - _closedLoopReference;
-      const int sign = (err > 0 ? 1 : (err < 0 ? -1 : 0));
-      if (_lastSign != 0 && sign != 0 && _lastSign != sign) {
-        _oscillationCount++;
-      }
-      _lastSign = sign;
-      _analyzeSumAbsError += std::fabs(err) * _simulationStep;
+      updateOscillationCountAnalyze(output);
+      _analyzeSumAbsError +=
+          std::fabs(output - _closedLoopReference) * _simulationStep;
       _analyzeStepCount++;
 
       if (_analyzeStepCount >= kAnalyzeDurationSteps) {
         const double score = scoreCurrentCandidate();
-        onCandidateTestFinished(score, _analyzeSumAbsError);
+        double overshootPct = 0.0;
+        if (_closedLoopReference > 1e-12 && _maxOutput > _closedLoopReference) {
+          overshootPct =
+              100.0 * (_maxOutput - _closedLoopReference) / _closedLoopReference;
+        }
+        onCandidateTestFinished(score, _analyzeSumAbsError, _settlingTimeS,
+                                overshootPct, _oscillationCount, _maxOutput);
       }
       break;
     }
@@ -149,17 +326,75 @@ double TuningTask::scoreCurrentCandidate() const {
   return followReward - oscillationPenalty;
 }
 
-std::vector<double> TuningTask::buildInitialFourTc() const {
-  const double theta = _plantModel.theta;
-  const double tau = _plantModel.tau1;
-  const double baseTc = (theta > 0.001) ? theta : (tau * 0.1);
-  const double tc_min = std::max(1e-9, baseTc * kInitialTcMinFactor);
-  const double tc_max = std::max(tc_min * 1.01, baseTc * kInitialTcMaxFactor);
+unsigned int TuningTask::oscillationMinOutsideStreakRequired() const {
+  unsigned int n = kOscillationMinOutsideSteps;
+  if (kOscillationMinOutsideMs > 0.0) {
+    const double stepMs = _simulationStep * 1000.0;
+    if (stepMs > 1e-18) {
+      const unsigned int fromT = static_cast<unsigned int>(
+          std::ceil(kOscillationMinOutsideMs / stepMs));
+      n = std::max(n, fromT);
+    }
+  }
+  return std::max(n, 1u);
+}
+
+double TuningTask::oscillationErrorDeadband() const {
+  const double noiseFloor = std::max(_noise, 1e-12);
+  const double halfBand =
+      std::max(kSettlingBandFrac * std::fabs(_closedLoopReference),
+               kSettlingBandNoiseMult * noiseFloor);
+  return std::max(halfBand, kOscillationDeadbandAbsFloor);
+}
+
+void TuningTask::updateOscillationCountAnalyze(double output) {
+  const double err = output - _closedLoopReference;
+  const double deadEnter = oscillationErrorDeadband();
+  const double deadRelease =
+      std::max(deadEnter * kOscillationDeadbandHysteresisRatio,
+               kOscillationDeadbandAbsFloor);
+  if (deadRelease >= deadEnter) {
+    _oscHystOutside = (err > deadEnter) ? 1 : ((err < -deadEnter) ? -1 : 0);
+  } else if (err > deadEnter) {
+    _oscHystOutside = 1;
+  } else if (err < -deadEnter) {
+    _oscHystOutside = -1;
+  } else if (std::fabs(err) < deadRelease) {
+    _oscHystOutside = 0;
+  }
+
+  const unsigned int needStreak = oscillationMinOutsideStreakRequired();
+
+  if (_oscHystOutside == 0) {
+    _oscOutsideStreak = 0;
+    _oscOutsideDir = 0;
+    _oscOutsideLobeConfirmed = false;
+    return;
+  }
+
+  if (_oscHystOutside == _oscOutsideDir) {
+    ++_oscOutsideStreak;
+  } else {
+    _oscOutsideDir = _oscHystOutside;
+    _oscOutsideStreak = 1;
+    _oscOutsideLobeConfirmed = false;
+  }
+
+  if (!_oscOutsideLobeConfirmed && _oscOutsideStreak >= needStreak) {
+    if (_lastSign != 0 && _lastSign != _oscOutsideDir) {
+      ++_oscillationCount;
+    }
+    _lastSign = _oscOutsideDir;
+    _oscOutsideLobeConfirmed = true;
+  }
+}
+
+std::vector<double> TuningTask::buildInitialThreeTc() const {
   std::vector<double> out;
-  out.reserve(4);
-  for (int i = 0; i < 4; ++i) {
-    const double alpha = static_cast<double>(i) / 3.0;
-    out.push_back(tc_min * std::pow(tc_max / tc_min, alpha));
+  out.reserve(3);
+  for (int i = 0; i < 3; ++i) {
+    out.push_back(kInitialTcProbeMinS +
+                   static_cast<double>(i) * kInitialTcProbeStepS);
   }
   return out;
 }
@@ -177,40 +412,43 @@ bool TuningTask::hasNearbyTc(double tc) const {
   return false;
 }
 
-void TuningTask::appendLateralCandidatesFromTopTwo() {
+void TuningTask::appendLateralCandidatesFromBestOne() {
   const size_t n = _round1Count;
   if (n == 0) {
     return;
   }
-  std::vector<size_t> order(n);
-  std::iota(order.begin(), order.end(), 0);
-  std::sort(order.begin(), order.end(), [this](size_t a, size_t b) {
-    return _candidateScores[a] > _candidateScores[b];
-  });
-  const size_t nTop = std::min<size_t>(2, n);
-  std::vector<double> proposed;
-  for (size_t k = 0; k < nTop; ++k) {
-    const double tc_star = _candidateTc[order[k]];
-    proposed.push_back(std::max(1e-12, tc_star * (1.0 - kTcLateralFraction)));
-    proposed.push_back(tc_star * (1.0 + kTcLateralFraction));
+
+  size_t bestIdx = 0;
+  bool hasFiniteJerk = false;
+  for (size_t i = 0; i < n; ++i) {
+    if (i >= _candidateJerkAbsMax.size() || !std::isfinite(_candidateJerkAbsMax[i])) {
+      continue;
+    }
+    if (!hasFiniteJerk || _candidateJerkAbsMax[i] < _candidateJerkAbsMax[bestIdx]) {
+      bestIdx = i;
+      hasFiniteJerk = true;
+    }
   }
+  if (!hasFiniteJerk) {
+    bestIdx = std::distance(
+        _candidateScores.begin(),
+        std::max_element(_candidateScores.begin(), _candidateScores.begin() + n));
+  }
+
+  std::vector<double> proposed;
+  const double tc_star = _candidateTc[bestIdx];
+  proposed.push_back(std::max(1e-12, tc_star * (1.0 - kTcLateralFraction)));
+  proposed.push_back(tc_star * (1.0 + kTcLateralFraction));
+
   size_t added = 0;
   for (double tc : proposed) {
     if (hasNearbyTc(tc)) {
       continue;
     }
-    PIDParameters currentParams;
-    switch (_controllerType) {
-      case ControllerType::PI:
-        currentParams = SkogestadTuner::calculatePI(_plantModel, tc);
-        break;
-      case ControllerType::PID:
-        currentParams = SkogestadTuner::calculatePID(_plantModel, tc);
-        break;
-      default:
-        _state = TuningState::ERROR;
-        return;
-    }
+    const PIDParameters currentParams =
+        (_controllerType == ControllerType::PI)
+            ? SkogestadTuner::calculatePI(_plantModel, tc)
+            : SkogestadTuner::calculatePID(_plantModel, tc);
     if (ParameterValidator::validate(currentParams)) {
       _candidates.push_back(currentParams);
       _candidateTc.push_back(tc);
@@ -218,8 +456,10 @@ void TuningTask::appendLateralCandidatesFromTopTwo() {
     }
   }
   _candidateScores.resize(_candidates.size(), -1e9);
+  _candidateJerkAbsMax.resize(_candidates.size(),
+                              std::numeric_limits<double>::quiet_NaN());
   std::cout << "Fase 2 — refinamento: " << added
-            << " candidato(s) lateral(is) em τ_c (vizinhos dos 2 melhores da fase 1).\n";
+            << " candidato(s) lateral(is) em τ_c (2 vizinhos do melhor da fase 1).\n";
   for (size_t i = _round1Count; i < _candidates.size(); ++i) {
     const auto& p = _candidates[i];
     std::cout << "  [" << (i + 1) << "] τ_c = " << _candidateTc[i] << ", Kp = " << p.Kp
@@ -227,53 +467,136 @@ void TuningTask::appendLateralCandidatesFromTopTwo() {
   }
 }
 
-void TuningTask::onCandidateTestFinished(double score, double iaeForThisCandidate) {
+void TuningTask::onCandidateTestFinished(double score, double iaeForThisCandidate,
+                                         double settlingTimeS,
+                                         double overshootPercent, int oscillations,
+                                         double peakSpeedForOvershoot) {
   const size_t idx = _currentCandidateIndex;
+  const double jerkAbsMaxThisCandidate = _jerkAbsMaxThisCandidate;
+  if (!std::isnan(jerkAbsMaxThisCandidate)) {
+    if (!_hasMinJerkMaxAmongCompletedTests) {
+      _minJerkMaxAmongCompletedTests = jerkAbsMaxThisCandidate;
+      _hasMinJerkMaxAmongCompletedTests = true;
+    } else {
+      _minJerkMaxAmongCompletedTests =
+          std::min(_minJerkMaxAmongCompletedTests, jerkAbsMaxThisCandidate);
+    }
+  }
+  _jerkAbsMaxThisCandidate = std::numeric_limits<double>::quiet_NaN();
+
+  const double tcDone =
+      (idx < _candidateTc.size()) ? _candidateTc[idx]
+                                  : std::numeric_limits<double>::quiet_NaN();
+  std::cout << "[Tuning] Teste candidato " << (idx + 1) << "/"
+            << _candidates.size() << ": tau_c=" << tcDone
+            << ", tempo_acomodacao_s=";
+  if (std::isnan(settlingTimeS)) {
+    std::cout << "n/a";
+  } else {
+    std::cout << settlingTimeS;
+  }
+  std::cout << ", ref=" << _closedLoopReference;
+  if (!std::isnan(peakSpeedForOvershoot)) {
+    std::cout << ", pico_speed=" << peakSpeedForOvershoot;
+  } else {
+    std::cout << ", pico_speed=n/a";
+  }
+  std::cout << ", sobressinal=" << formatPercentForLog(overshootPercent);
+  std::cout << ", oscilacoes=" << oscillations;
+  if (!std::isnan(iaeForThisCandidate)) {
+    std::cout << ", IAE=" << iaeForThisCandidate;
+  }
+  if (std::isfinite(jerkAbsMaxThisCandidate)) {
+    std::cout << ", jerk_abs_max_WaitTouchRef=" << jerkAbsMaxThisCandidate;
+  } else {
+    std::cout << ", jerk_abs_max_WaitTouchRef=n/a";
+  }
+  std::cout << ", score=" << score << "\n";
+
   if (idx < _candidateScores.size()) {
     _candidateScores[idx] = score;
   }
-  if (score > _bestScore) {
+  if (idx < _candidateJerkAbsMax.size()) {
+    _candidateJerkAbsMax[idx] = jerkAbsMaxThisCandidate;
+  }
+
+  const bool currentJerkValid = std::isfinite(jerkAbsMaxThisCandidate);
+  const bool bestJerkValid = std::isfinite(_bestJerkAbsMax);
+  bool replaceBest = false;
+  if (currentJerkValid && !bestJerkValid) {
+    replaceBest = true;
+  } else if (currentJerkValid && bestJerkValid) {
+    if (jerkAbsMaxThisCandidate < _bestJerkAbsMax) {
+      replaceBest = true;
+    } else if (std::fabs(jerkAbsMaxThisCandidate - _bestJerkAbsMax) <= 1e-12 &&
+               score > _bestScore) {
+      replaceBest = true;
+    }
+  } else if (!currentJerkValid && !bestJerkValid && score > _bestScore) {
+    replaceBest = true;
+  }
+
+  if (replaceBest) {
     _bestScore = score;
+    _bestJerkAbsMax = jerkAbsMaxThisCandidate;
     _bestCandidateIndex = idx;
     _parameters = _candidates[idx];
     if (!std::isnan(iaeForThisCandidate)) {
       _testScore = iaeForThisCandidate;
     }
+    _bestSettlingTimeS = settlingTimeS;
+    _bestOvershootPercent = overshootPercent;
+    _bestOscillations = oscillations;
+    _bestPeakSpeedForOvershoot = peakSpeedForOvershoot;
   }
   _currentCandidateIndex++;
   if (_controllerTestRound == ControllerTestRound::INITIAL && _round1Count > 0 &&
       _currentCandidateIndex == _round1Count) {
-    appendLateralCandidatesFromTopTwo();
+    appendLateralCandidatesFromBestOne();
     _controllerTestRound = ControllerTestRound::REFINEMENT;
   }
   if (_currentCandidateIndex < _candidates.size()) {
     _testPhase = TestPhase::Prepare;
     _prepareSteps = 0;
+    _resetSystemBeforePrepare = true;
   } else {
     _parameters = _candidates[_bestCandidateIndex];
     _state = TuningState::COMPLETED;
-    _isReady = true;
+    const double tcBest = _candidateTc[_bestCandidateIndex];
+    std::cout << "[Tuning] Ganhos escolhidos: Kp=" << _parameters.Kp << ", Ti=" << _parameters.Ti
+              << ", Td=" << _parameters.Td << ", tau_c=" << tcBest
+              << " — tempo_acomodacao_s=";
+    if (std::isnan(_bestSettlingTimeS)) {
+      std::cout << "n/a";
+    } else {
+      std::cout << _bestSettlingTimeS;
+    }
+    std::cout << ", ref=" << _closedLoopReference;
+    if (!std::isnan(_bestPeakSpeedForOvershoot)) {
+      std::cout << ", pico_speed=" << _bestPeakSpeedForOvershoot;
+    } else {
+      std::cout << ", pico_speed=n/a";
+    }
+    std::cout << ", sobressinal=" << formatPercentForLog(_bestOvershootPercent);
+    std::cout << ", oscilacoes=" << _bestOscillations;
+    if (std::isfinite(_bestJerkAbsMax)) {
+      std::cout << ", jerk_abs_max_WaitTouchRef=" << _bestJerkAbsMax;
+    } else {
+      std::cout << ", jerk_abs_max_WaitTouchRef=n/a";
+    }
+    std::cout << "\n";
   }
 }
 
 void TuningTask::tuneController() {
-  const std::vector<double> tcList = buildInitialFourTc();
   _candidates.clear();
   _candidateTc.clear();
 
-  for (double tc : tcList) {
-    PIDParameters currentParams;
-    switch (_controllerType) {
-      case ControllerType::PI:
-        currentParams = SkogestadTuner::calculatePI(_plantModel, tc);
-        break;
-      case ControllerType::PID:
-        currentParams = SkogestadTuner::calculatePID(_plantModel, tc);
-        break;
-      default:
-        _state = TuningState::ERROR;
-        return;
-    }
+  for (double tc : buildInitialThreeTc()) {
+    const PIDParameters currentParams =
+        (_controllerType == ControllerType::PI)
+            ? SkogestadTuner::calculatePI(_plantModel, tc)
+            : SkogestadTuner::calculatePID(_plantModel, tc);
     if (ParameterValidator::validate(currentParams)) {
       _candidates.push_back(currentParams);
       _candidateTc.push_back(tc);
@@ -285,8 +608,9 @@ void TuningTask::tuneController() {
     return;
   }
 
-  std::cout << "Fase 1 — 4 ganhos espaçados (τ_c em escala log entre "
-            << kInitialTcMinFactor << "× e " << kInitialTcMaxFactor << "× da base SIMC):\n";
+  const double tc_end = kInitialTcProbeMinS + 2.0 * kInitialTcProbeStepS;
+  std::cout << "Fase 1 — 3 ganhos (τ_c de " << kInitialTcProbeMinS << " a " << tc_end
+            << " s, passo " << kInitialTcProbeStepS << " s):\n";
   for (size_t i = 0; i < _candidates.size(); ++i) {
     const auto& p = _candidates[i];
     std::cout << "  [" << (i + 1) << "] τ_c = " << _candidateTc[i] << ", Kp = " << p.Kp
@@ -298,21 +622,18 @@ void TuningTask::tuneController() {
   _controllerTestRound = ControllerTestRound::INITIAL;
   _round1Count = _candidates.size();
   _candidateScores.assign(_round1Count, -1e9);
+  _candidateJerkAbsMax.assign(_round1Count,
+                              std::numeric_limits<double>::quiet_NaN());
   _currentCandidateIndex = 0;
   _testPhase = TestPhase::Prepare;
   _prepareSteps = 0;
+  _resetSystemBeforePrepare = true;
   _bestScore = -1e9;
+  _bestJerkAbsMax = std::numeric_limits<double>::quiet_NaN();
   _bestCandidateIndex = 0;
   _state = TuningState::TEST_CONTROLLER;
-}
-
-bool TuningTask::isBetterParams(const PIDParameters& current,
-                                const PIDParameters& best) {
-  return current.Kp < best.Kp;
-}
-
-bool TuningTask::isReady() const {
-  return _isReady && _state == TuningState::COMPLETED;
+  _postIdentificationWaitCounter = 0;
+  _postIdentificationZeroStreak = 0;
 }
 
 bool TuningTask::isCompleted() const {
