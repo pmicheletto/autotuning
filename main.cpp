@@ -1,3 +1,4 @@
+#include <cmath>
 #include <iostream>
 #include <limits>
 #include <optional>
@@ -90,12 +91,24 @@ int main(int argc, char** argv) {
         task.noteControllerTestJerkSample(jerk_sample);
         const double jerk_max_current_gain_test =
             task.debugUdpJerkMaxCurrentCandidate();
+        const auto transient_debug = task.debugTransientState();
         simTxt.append(t, step, speed, jerk_sample, speed_filt,
                       jerk_max_current_gain_test,
                       phase);
+
+        const double step_ref = system->readValue("driver.step.height");
+        const double step_band = (transient_debug.refBand > 0.0)
+                                    ? transient_debug.refBand
+                                    : 0.02 * std::fabs(step_ref);
+        const double step_min_band = step_ref - step_band;
+        const double step_max_band = step_ref + step_band;
+
         std::string json =
             "{\"time\": " + std::to_string(t) +
             ", \"step\": " + std::to_string(step) +
+            ", \"step_ref\": " + std::to_string(step_ref) +
+            ", \"step_min_band\": " + std::to_string(step_min_band) +
+            ", \"step_max_band\": " + std::to_string(step_max_band) +
             ", \"speed\": " + std::to_string(speed) +
             ", \"jerk\": ";
         if (jerk_sample.has_value()) {
@@ -103,10 +116,15 @@ int main(int argc, char** argv) {
         } else {
           json += "null";
         }
+
         json += ", \"speed_filt\": " + std::to_string(speed_filt) +
-            ", \"jerk_max_current_gain_test\": " +
-            std::to_string(jerk_max_current_gain_test) +
-            ", \"test_phase\": \"" + phase + "\"}";
+            ", \"jerk_max_current_gain_test\": ";
+        if (std::isfinite(jerk_max_current_gain_test)) {
+          json += std::to_string(jerk_max_current_gain_test);
+        } else {
+          json += "null";
+        }
+        json += ", \"test_phase\": \"" + phase + "\"}";
         udp.send(json);
       }
 

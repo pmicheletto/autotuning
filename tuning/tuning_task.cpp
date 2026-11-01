@@ -68,6 +68,23 @@ std::string TuningTask::debugTestPhaseName() const {
   return "?";
 }
 
+TuningTask::DebugTransientState TuningTask::debugTransientState() const {
+  DebugTransientState out;
+  if (_state != TuningState::TEST_CONTROLLER || _testPhase != TestPhase::WaitTransient) {
+    return out;
+  }
+
+  const double noiseFloor = std::max(_noise, 1e-12);
+  out.acceptedDeviation = std::max(kZeroSpeedAbsTol, kZeroSpeedNoiseFactor * noiseFloor);
+  out.refBand = std::max(kSettlingBandFrac * std::fabs(_closedLoopReference),
+                        kSettlingBandNoiseMult * noiseFloor);
+  out.refError = _system->readValue(kOutputVar) - _closedLoopReference;
+  out.nearReference = std::fabs(out.refError) <= out.refBand;
+  out.deviation = _testWelford.GetDeviation();
+  out.stableStreak = _waitTransientStableStreak;
+  return out;
+}
+
 void TuningTask::stepSimulation() {
   _system->advanceSimulation(_simulationStep);
 }
@@ -188,6 +205,7 @@ void TuningTask::runTestController() {
       _prepareNearZeroStreak = 0;
       _waitTouchRefSteps = 0;
       _waitTransientStepCount = 0;
+      _waitTransientStableStreak = 0;
       _testPhase = TestPhase::WaitTransient;
       _maxOutput = 0.0;
       _hasOvershoot5 = false;
@@ -215,33 +233,46 @@ void TuningTask::runTestController() {
                   << ", ref=" << _closedLoopReference << "\n";
       }
       _waitTransientStepCount++;
-      const double deviation = _testWelford.GetDeviation();
       const double noiseFloor = std::max(_noise, 1e-12);
-      const double driftTol =
-          std::max(kWaitTransientDriftNoiseMult * noiseFloor,
-                   kWaitTransientDriftAbsMin);
+      const double acceptedDeviation =
+          std::max(kZeroSpeedAbsTol, kZeroSpeedNoiseFactor * noiseFloor);
       const double drift = std::fabs(output - _waitTransientStartOutput);
       const double stepJump = std::fabs(output - _waitTransientPrevOutput);
+      const double refBand =
+          std::max(kSettlingBandFrac * std::fabs(_closedLoopReference),
+                   kSettlingBandNoiseMult * noiseFloor);
+      const double refError = output - _closedLoopReference;
+      const bool nearReference = std::fabs(refError) <= refBand;
       _waitTransientPrevOutput = output;
 
-      const bool byDeviation = deviation > _noise;
-      const bool byDrift = drift > driftTol;
-      const bool byRefProgress =
-          _closedLoopReference > 1e-9 &&
-          _waitTransientStartOutput <
-              kWaitTransientRefProgressMaxStartFrac * _closedLoopReference &&
-          output >= kWaitTransientRefProgressFrac * _closedLoopReference;
-      const bool byStepJump =
-          stepJump > kWaitTransientStepJumpNoiseMult * noiseFloor;
+      if (nearReference) {
+        _testWelford.AddSample(refError);
+      } else {
+        _testWelford.Clear();
+      }
+
+      const double deviation = _testWelford.GetDeviation();
+      const bool byDeviation = nearReference && deviation <= acceptedDeviation;
+      const bool byDrift = drift <= std::max(kWaitTransientDriftNoiseMult * noiseFloor,
+                                            kWaitTransientDriftAbsMin);
+      const bool byStepJump = stepJump <= kWaitTransientStepJumpNoiseMult * noiseFloor;
 
       const double nearZeroTol =
           std::max(kZeroSpeedAbsTol, kZeroSpeedNoiseFactor * _noise);
       const bool stillNearZero = std::fabs(output) <= nearZeroTol;
 
-      if (byDeviation || byDrift || byRefProgress || byStepJump) {
+      if (byDeviation && byDrift && byStepJump) {
+        ++_waitTransientStableStreak;
+      } else {
+        _waitTransientStableStreak = 0;
+      }
+
+      if (_waitTransientStableStreak >= kWaitTransientStableSamples) {
         std::cout << "[Tuning] WaitTransient -> WaitTouchRef (passos="
-                  << _waitTransientStepCount << ", desvio=" << deviation
-                  << ", drift=" << drift << ", |dout|=" << stepJump << ")\n";
+                  << _waitTransientStepCount << ", erro_ref=" << refError
+                  << ", desvio=" << deviation << ", faixa_aceita="
+                  << acceptedDeviation << ", amostras_estaveis="
+                  << _waitTransientStableStreak << ")\n";
         _jerkAbsMaxThisCandidate = std::numeric_limits<double>::quiet_NaN();
         _testPhase = TestPhase::WaitTouchRef;
       } else if (_waitTransientStepCount >= kWaitTransientMaxSteps &&
@@ -253,6 +284,7 @@ void TuningTask::runTestController() {
       } else if (_waitTransientStepCount >= kWaitTransientMaxSteps &&
                  stillNearZero) {
         _waitTransientStepCount = 0;
+        _waitTransientStableStreak = 0;
         if (!_waitTransientStallLogged) {
           std::cout << "Aviso: WaitTransient atingiu " << kWaitTransientMaxSteps
                     << " passos com saida ainda ~0 — continua em WaitTransient "

@@ -38,18 +38,18 @@ void WelfordAlgorithm::AddSample(double new_value) {
     }
 }
 
-double WelfordAlgorithm::GetMean() {
+double WelfordAlgorithm::GetMean() const {
     return mean_;
 }
 
-double WelfordAlgorithm::GetVariance() {
+double WelfordAlgorithm::GetVariance() const {
     if (count_ < window_size_) {
         return 0.0;
     }
     return m2_ / (count_ - 1);
 }
 
-double WelfordAlgorithm::GetDeviation() {
+double WelfordAlgorithm::GetDeviation() const {
     return std::sqrt(GetVariance());
 }
 

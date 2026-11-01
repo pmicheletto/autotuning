@@ -10,9 +10,9 @@ class WelfordAlgorithm {
 
   void AddSample(double new_value);
   void Clear();
-  double GetMean();
-  double GetVariance();
-  double GetDeviation();
+  double GetMean() const;
+  double GetVariance() const;
+  double GetDeviation() const;
 
  protected:
   double* window_;

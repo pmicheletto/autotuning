@@ -50,6 +50,16 @@ class TuningTask {
   }
   std::string debugTestPhaseName() const;
 
+  struct DebugTransientState {
+    double refBand{0.0};
+    double acceptedDeviation{0.0};
+    double deviation{0.0};
+    double refError{0.0};
+    bool nearReference{false};
+    unsigned int stableStreak{0};
+  };
+  DebugTransientState debugTransientState() const;
+
   // In TEST_CONTROLLER / WaitTouchRef: accumulates max |jerk| for the current test (UDP subsampling).
   void noteControllerTestJerkSample(std::optional<double> jerk);
   // Max |jerk| for the current candidate; reset between tests.
@@ -127,7 +137,8 @@ class TuningTask {
   static constexpr double kWaitTransientRefProgressFrac = 0.0004;
   static constexpr double kWaitTransientRefProgressMaxStartFrac = 0.05;
   static constexpr double kWaitTransientStepJumpNoiseMult = 5.0;
-  static constexpr unsigned int kWaitTransientMaxSteps = 20000;
+  static constexpr unsigned int kWaitTransientStableSamples = 10;
+  static constexpr unsigned int kWaitTransientMaxSteps = 30000;
   // After plant ID (Sundaresan), require open-loop output near zero for a stable window
   // before starting gain tests.
   static constexpr unsigned int kPostIdentificationZeroStableSteps = 7000;
@@ -148,6 +159,7 @@ class TuningTask {
   double _waitTransientStartOutput{0.0};
   double _waitTransientPrevOutput{0.0};
   unsigned int _waitTransientStepCount{0};
+  unsigned int _waitTransientStableStreak{0};
   bool _waitTransientStallLogged{false};
   bool _problematicoDebugPrinted{false};
   unsigned int _postIdentificationWaitCounter{0};
