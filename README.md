@@ -7,7 +7,7 @@ statistics utilities, and unit/integration tests.
 
 ## Authorship
 
-I, Patrícia Micheletto, created and developed this project. I began working
+I,[Patrícia Micheletto](https://github.com/pmicheletto), created and developed this project. I began working
 on it in February 2026, as reflected in the project history.
 
 The project is built with CMake and uses [FMI4cpp](https://github.com/NTNU-IHB/FMI4cpp)
